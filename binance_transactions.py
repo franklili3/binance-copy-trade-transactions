@@ -67,11 +67,79 @@ class BinanceTransactions:
     def _test_connection(self):
         """测试API连接"""
         try:
+            # 首先尝试获取服务器时间（不需要认证）
+            server_time = self.exchange.fetch_time()
+            logger.info(f"币安服务器时间: {datetime.fromtimestamp(server_time/1000)}")
+            
+            # 然后尝试获取账户信息（需要认证）
             balance = self.exchange.fetch_balance()
             logger.info("API连接成功")
-        except Exception as e:
-            logger.error(f"API连接失败: {e}")
+            
+            # 检查账户权限
+            if 'info' in balance:
+                account_type = balance['info'].get('accountType', 'UNKNOWN')
+                logger.info(f"账户类型: {account_type}")
+            
+            # 检查API权限
+            self._check_api_permissions()
+            
+        except ccxt.AuthenticationError as e:
+            logger.error(f"API认证失败: {e}")
+            logger.error("请检查API密钥是否正确，或者是否有足够的权限")
             raise
+        except ccxt.PermissionDenied as e:
+            logger.error(f"API权限不足: {e}")
+            logger.error("请确保API密钥有以下权限：现货交易、读取信息")
+            raise
+        except ccxt.NetworkError as e:
+            logger.error(f"网络连接错误: {e}")
+            logger.error("请检查网络连接，或者是否需要使用代理")
+            raise
+        except ccxt.ExchangeError as e:
+            logger.error(f"交易所错误: {e}")
+            logger.error("可能是API配置问题或交易所限制")
+            raise
+        except Exception as e:
+            logger.error(f"未知错误: {e}")
+            logger.error(f"错误类型: {type(e).__name__}")
+            raise
+    
+    def _check_api_permissions(self):
+        """检查API权限"""
+        try:
+            logger.info("检查API权限...")
+            
+            # 检查账户信息权限
+            try:
+                account_info = self.exchange.fetch_account()
+                logger.info("✓ 账户信息权限 - 正常")
+            except Exception as e:
+                logger.warning(f"✗ 账户信息权限 - 失败: {e}")
+            
+            # 检查交易历史权限
+            try:
+                # 尝试获取最近的交易记录
+                trades = self.exchange.fetch_my_trades('BTC/USDT', limit=1)
+                logger.info("✓ 交易历史权限 - 正常")
+            except Exception as e:
+                logger.warning(f"✗ 交易历史权限 - 失败: {e}")
+            
+            # 检查订单权限
+            try:
+                orders = self.exchange.fetch_orders('BTC/USDT', limit=1)
+                logger.info("✓ 订单权限 - 正常")
+            except Exception as e:
+                logger.warning(f"✗ 订单权限 - 失败: {e}")
+            
+            # 检查余额权限
+            try:
+                balance = self.exchange.fetch_balance()
+                logger.info("✓ 余额权限 - 正常")
+            except Exception as e:
+                logger.warning(f"✗ 余额权限 - 失败: {e}")
+                
+        except Exception as e:
+            logger.warning(f"权限检查过程中出错: {e}")
     
     def get_all_transactions(self, symbol=None, since=None, limit=None, days=None):
         """
