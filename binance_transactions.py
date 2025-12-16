@@ -351,10 +351,10 @@ class BinanceTransactions:
         
         # 创建时间序列（与交易数据的日期范围一致）
         if transactions_df is not None and not transactions_df.empty:
-            # 使用交易数据的日期范围
-            start_date = transactions_df.index.min()
-            end_date = transactions_df.index.max()
-            date_range = pd.date_range(start=start_date, end=end_date, freq='D')
+            # 使用交易数据的日期范围，获取所有唯一的日期
+            unique_dates = transactions_df.index.normalize().unique()
+            # 按日期排序
+            date_range = pd.DatetimeIndex(sorted(unique_dates))
         else:
             # 如果没有交易数据，使用最近30天的日期范围
             end_date = pd.Timestamp.now(tz='UTC')
