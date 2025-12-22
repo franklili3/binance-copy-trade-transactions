@@ -156,9 +156,12 @@ class BinanceTransactions:
             list: 交易记录列表
         """
         try:
-            # 如果提供了days参数，计算since
-            if days and not since:
-                since = int((datetime.now() - pd.Timedelta(days=days)).timestamp() * 1000)
+            # 如果没有提供since参数，使用2025-4-1作为默认开始日期
+            if not since:
+                if days:
+                    since = int((datetime.now() - pd.Timedelta(days=days)).timestamp() * 1000)
+                else:
+                    since = int(datetime(2025, 4, 1, tzinfo=timezone.utc).timestamp() * 1000)
             
             # 如果没有指定交易对，尝试获取主要交易对的交易记录
             if not symbol:
@@ -284,10 +287,10 @@ class BinanceTransactions:
             pd.DataFrame: 包含日期和价格数据的DataFrame
         """
         try:
-            # 如果没有指定日期范围，使用默认天数
+            # 如果没有指定日期范围，使用默认开始日期2025-4-1
             if not start_date and not end_date:
                 end_date = datetime.now(tz=timezone.utc)
-                start_date = end_date - timedelta(days=days)
+                start_date = datetime(2025, 4, 1, tzinfo=timezone.utc)
             else:
                 # 转换日期字符串为datetime对象
                 if start_date:
@@ -338,10 +341,10 @@ class BinanceTransactions:
         try:
             logger.info("使用币安公开API获取比特币价格数据...")
             
-            # 计算日期范围
+            # 计算日期范围，使用默认开始日期2025-4-1
             if not start_date:
                 end_date = datetime.now(tz=timezone.utc)
-                start_date = end_date - timedelta(days=days)
+                start_date = datetime(2025, 4, 1, tzinfo=timezone.utc)
             elif not end_date:
                 end_date = datetime.now(tz=timezone.utc)
             
@@ -797,10 +800,10 @@ class BinanceTransactions:
         try:
             logger.info("生成模拟比特币价格数据...")
             
-            # 计算日期范围
+            # 计算日期范围，使用默认开始日期2025-4-1
             if not start_date:
                 end_date = datetime.now(tz=timezone.utc)
-                start_date = end_date - timedelta(days=days)
+                start_date = datetime(2025, 4, 1, tzinfo=timezone.utc)
             elif not end_date:
                 end_date = datetime.now(tz=timezone.utc)
             
@@ -931,8 +934,8 @@ class BinanceTransactions:
         """
         logger.info("开始获取币安交易数据...")
         
-        # 计算开始时间
-        since = int((datetime.now() - pd.Timedelta(days=days)).timestamp() * 1000)
+        # 使用默认开始时间2025-4-1
+        since = int(datetime(2025, 4, 1, tzinfo=timezone.utc).timestamp() * 1000)
         
         # 获取数据
         transactions = self.get_all_transactions(symbol=symbol, since=since)
