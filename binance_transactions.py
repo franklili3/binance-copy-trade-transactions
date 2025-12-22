@@ -663,44 +663,50 @@ class BinanceTransactions:
         positions_df['USDT'] = 0.0
         
         # 添加初始USDT余额（假设有初始资金）
-        # 在实际应用中，这应该从账户余额获取
         initial_usdt = 10000.0  # 默认初始资金
-        positions_df['USDT'] = initial_usdt
+        positions_df.loc[:, 'USDT'] = initial_usdt
         
-        # 按日期处理交易
-        for tx in raw_transactions:
-            tx_date = pd.to_datetime(tx['datetime'], utc=True).normalize()
+        # 按日期处理交易，逐日更新持仓
+        current_btc = 0.0
+        current_usdt = initial_usdt
+        
+        # 先按日期排序交易记录
+        sorted_transactions = sorted(raw_transactions, key=lambda x: x['datetime'])
+        
+        # 为每个日期处理交易
+        for i, date in enumerate(date_range):
+            # 处理当日的所有交易
+            date_str = date.strftime('%Y-%m-%d')
+            daily_transactions = [tx for tx in sorted_transactions 
+                                if pd.to_datetime(tx['datetime'], utc=True).date() == date.date()]
             
-            if tx_date not in positions_df.index:
-                continue
-            
-            symbol = tx['symbol']
-            side = tx['side']
-            amount = tx['amount']
-            cost = tx['cost']
-            price = tx['price']
-            
-            if symbol == 'BTC/USDT':
-                if side == 'buy':
-                    # 买入BTC：减少USDT，增加BTC
-                    positions_df.loc[tx_date:, 'BTC'] += amount
-                    positions_df.loc[tx_date:, 'USDT'] -= cost
-                else:  # sell
-                    # 卖出BTC：增加USDT，减少BTC
-                    positions_df.loc[tx_date:, 'BTC'] -= amount
-                    positions_df.loc[tx_date:, 'USDT'] += cost
-            elif symbol.endswith('/USDT'):
-                # 其他USDT交易对
-                base_asset = symbol.split('/')[0]
-                if base_asset not in positions_df.columns:
-                    positions_df[base_asset] = 0.0
+            # 处理当日每笔交易
+            for tx in daily_transactions:
+                symbol = tx['symbol']
+                side = tx['side']
+                amount = tx['amount']
+                cost = tx['cost']
+                price = tx['price']
                 
-                if side == 'buy':
-                    positions_df.loc[tx_date:, base_asset] += amount
-                    positions_df.loc[tx_date:, 'USDT'] -= cost
-                else:  # sell
-                    positions_df.loc[tx_date:, base_asset] -= amount
-                    positions_df.loc[tx_date:, 'USDT'] += cost
+                if symbol == 'BTC/USDT':
+                    if side == 'buy':
+                        # 买入BTC：减少USDT，增加BTC
+                        current_btc += amount
+                        current_usdt -= cost
+                    else:  # sell
+                        # 卖出BTC：增加USDT，减少BTC
+                        current_btc -= amount
+                        current_usdt += cost
+                elif symbol.endswith('/USDT'):
+                    # 其他USDT交易对，简化处理为USDT价值变化
+                    if side == 'buy':
+                        current_usdt -= cost
+                    else:  # sell
+                        current_usdt += cost
+            
+            # 更新当日持仓
+            positions_df.loc[date, 'BTC'] = current_btc
+            positions_df.loc[date, 'USDT'] = current_usdt
         
         return positions_df
     
