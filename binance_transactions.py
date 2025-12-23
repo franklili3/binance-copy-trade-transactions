@@ -159,7 +159,7 @@ class BinanceTransactions:
             # 如果没有提供since参数，使用2025-4-1作为默认开始日期
             if not since:
                 if days:
-                    since = int((datetime.now() - pd.Timedelta(days=days)).timestamp() * 1000)
+                    since = int((datetime.now(timezone.utc) - pd.Timedelta(days=days)).timestamp() * 1000)
                 else:
                     since = int(datetime(2025, 4, 1, tzinfo=timezone.utc).timestamp() * 1000)
             
@@ -557,28 +557,42 @@ class BinanceTransactions:
             transactions (list): ccxt格式的交易记录
             
         Returns:
-            pd.DataFrame: pyfolio格式的交易数据，只包含txn_volume和txn_shares列
+            pd.DataFrame: pyfolio格式的交易数据，包含正确符号的txn_volume和txn_shares列
         """
         if not transactions:
             return pd.DataFrame()
         
         pyfolio_data = []
         for tx in transactions:
-            # 计算交易金额和数量
-            txn_volume = tx['cost']  # 交易金额
-            txn_shares = tx['amount']  # 交易数量
+            # 计算交易金额和数量，卖出时使用负值
+            if tx['side'] == 'sell':
+                txn_volume = -abs(tx['cost'])  # 卖出时交易金额为负
+                txn_shares = -abs(tx['amount'])  # 卖出时交易数量为负
+            else:  # buy
+                txn_volume = abs(tx['cost'])   # 买入时交易金额为正
+                txn_shares = abs(tx['amount'])  # 买入时交易数量为正
             
             pyfolio_data.append({
                 'date': pd.to_datetime(tx['datetime'], utc=True),
                 'txn_volume': txn_volume,
-                'txn_shares': txn_shares
+                'txn_shares': txn_shares,
+                'symbol': tx['symbol'],  # 保留symbol信息用于调试
+                'side': tx['side']       # 保留side信息用于调试
             })
         
         df = pd.DataFrame(pyfolio_data)
         df.set_index('date', inplace=True)
         df.sort_index(inplace=True)
         
-        return df
+        # 移除调试列，只保留pyfolio需要的列
+        pyfolio_df = df[['txn_volume', 'txn_shares']].copy()
+        
+        logger.info(f"转换了 {len(transactions)} 条交易记录")
+        logger.info(f"买入交易: {len(df[df['side'] == 'buy'])} 条")
+        logger.info(f"卖出交易: {len(df[df['side'] == 'sell'])} 条")
+        logger.info(f"交易日期范围: {pyfolio_df.index.min()} 到 {pyfolio_df.index.max()}")
+        
+        return pyfolio_df
     
     def positions_to_pyfolio_format(self, positions, transactions_df=None):
         """
