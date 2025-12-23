@@ -531,7 +531,7 @@ class BinanceTransactions:
     
     def calculate_positions_from_transactions(self, symbol=None, days=30):
         """
-        基于交易记录计算每日持仓变化（优化版本）
+        基于交易记录计算每日持仓变化（修复版本）
         
         Args:
             symbol (str): 交易对，如'BTC/USDT'
@@ -568,13 +568,14 @@ class BinanceTransactions:
             date_range = pd.date_range(start=start_date, end=end_date, freq='D', tz='UTC')
             
             # 预先确定所有涉及的资产
-            all_assets = set(['USDT'])  # 包含初始现金
+            all_assets = set(['cash'])  # 包含初始现金，直接使用cash列名
             for tx in raw_transactions:
                 symbol = tx['symbol']
                 if '/' in symbol:
                     base_asset, quote_asset = symbol.split('/')
                     all_assets.add(base_asset)
-                    all_assets.add(quote_asset)
+                    if quote_asset != 'USDT':
+                        all_assets.add(quote_asset)
             
             logger.info(f"涉及的资产: {list(all_assets)}")
             
@@ -582,74 +583,114 @@ class BinanceTransactions:
             positions_data = {asset: [0.0] * len(date_range) for asset in all_assets}
             positions_df = pd.DataFrame(positions_data, index=date_range)
             
-            # 设置初始USDT余额
-            initial_usdt = 10000.0
-            positions_df.iloc[0]['USDT'] = initial_usdt
+            # 设置初始现金余额
+            initial_cash = 10000.0
+            positions_df.loc[positions_df.index[0], 'cash'] = initial_cash
             
             # 按日期排序交易记录
             sorted_transactions = sorted(raw_transactions, key=lambda x: x['datetime'])
             
-            # 初始化持仓追踪
-            current_holdings = {asset: 0.0 for asset in all_assets}
-            current_holdings['USDT'] = initial_usdt
+            # 初始化持仓追踪（资产数量，不是价值）
+            current_quantities = {asset: 0.0 for asset in all_assets}
+            current_quantities['cash'] = initial_cash
             
-            # 批量处理交易数据
+            # 逐日处理交易数据
             for i, date in enumerate(date_range):
                 if i > 0:
-                    # 继承前一天的持仓
+                    # 继承前一天的资产数量
                     for asset in all_assets:
-                        current_holdings[asset] = positions_df.iloc[i-1][asset]
+                        current_quantities[asset] = positions_df.iloc[i-1, positions_df.columns.get_loc(asset)]
+                        if asset != 'cash':
+                            # 对于非现金资产，需要转换为数量（除以价格）
+                            if asset == 'BTC' and current_quantities[asset] > 0:
+                                if date in btc_price_df.index:
+                                    btc_price = btc_price_df.loc[date, 'close']
+                                else:
+                                    nearest_date = btc_price_df.index[btc_price_df.index.get_indexer([date], method='nearest')[0]]
+                                    btc_price = btc_price_df.loc[nearest_date, 'close']
+                                # 将价值转换为数量
+                                if btc_price > 0:
+                                    current_quantities[asset] = current_quantities[asset] / btc_price
+                            elif asset != 'cash' and current_quantities[asset] > 0:
+                                # 其他资产使用估算价格转换为数量
+                                estimated_price = self._get_asset_price_estimate(asset)
+                                if estimated_price > 0:
+                                    current_quantities[asset] = current_quantities[asset] / estimated_price
                 
                 # 处理当日的所有交易
                 date_transactions = [tx for tx in sorted_transactions 
                                    if pd.to_datetime(tx['datetime'], utc=True).date() == date.date()]
                 
-                # 更新持仓
+                # 更新资产数量（不是价值）
                 for tx in date_transactions:
                     symbol = tx['symbol']
                     side = tx['side']
-                    amount = tx['amount']
-                    cost = tx['cost']
+                    amount = tx['amount']  # 这是基础资产的数量
+                    cost = tx['cost']      # 这是报价资产的数量
                     
                     if '/' in symbol:
                         base_asset, quote_asset = symbol.split('/')
                     else:
                         continue
                     
-                    if side == 'buy':
-                        current_holdings[base_asset] = current_holdings.get(base_asset, 0) + amount
-                        current_holdings[quote_asset] = current_holdings.get(quote_asset, 0) - cost
-                    else:  # sell
-                        current_holdings[base_asset] = current_holdings.get(base_asset, 0) - amount
-                        current_holdings[quote_asset] = current_holdings.get(quote_asset, 0) + cost
-                
-                # 批量更新当日持仓
-                for asset in all_assets:
-                    quantity = current_holdings.get(asset, 0)
+                    # 确保quote_asset是USDT或其他稳定币，如果是USDT我们当作cash处理
+                    if quote_asset == 'USDT':
+                        quote_asset = 'cash'
                     
-                    if quantity <= 0:
-                        positions_df.iloc[i, positions_df.columns.get_loc(asset)] = 0.0
-                    elif asset == 'USDT':
-                        positions_df.iloc[i, positions_df.columns.get_loc(asset)] = quantity
+                    # 更新资产数量
+                    if side == 'buy':
+                        # 买入base资产，支付quote资产
+                        current_quantities[base_asset] = current_quantities.get(base_asset, 0) + amount
+                        current_quantities[quote_asset] = current_quantities.get(quote_asset, 0) - cost
+                    else:  # sell
+                        # 卖出base资产，获得quote资产
+                        current_quantities[base_asset] = current_quantities.get(base_asset, 0) - amount
+                        current_quantities[quote_asset] = current_quantities.get(quote_asset, 0) + cost
+                
+                # 计算当日持仓价值并更新DataFrame
+                for asset in all_assets:
+                    quantity = current_quantities.get(asset, 0)
+                    
+                    if asset == 'cash':
+                        # 现金直接使用数量
+                        positions_df.iloc[i, positions_df.columns.get_loc(asset)] = max(0, quantity)
                     elif asset == 'BTC':
-                        # 获取当日BTC价格
-                        if date in btc_price_df.index:
+                        # BTC数量乘以当日价格
+                        if quantity > 0 and date in btc_price_df.index:
                             btc_price = btc_price_df.loc[date, 'close']
-                        else:
+                            positions_df.iloc[i, positions_df.columns.get_loc(asset)] = quantity * btc_price
+                        elif quantity > 0:
+                            # 使用最近的价格
                             nearest_date = btc_price_df.index[btc_price_df.index.get_indexer([date], method='nearest')[0]]
                             btc_price = btc_price_df.loc[nearest_date, 'close']
-                        positions_df.iloc[i, positions_df.columns.get_loc(asset)] = quantity * btc_price
+                            if np.isfinite(btc_price) and btc_price > 0:
+                                positions_df.iloc[i, positions_df.columns.get_loc(asset)] = quantity * btc_price
+                            else:
+                                positions_df.iloc[i, positions_df.columns.get_loc(asset)] = 0.0
+                        else:
+                            positions_df.iloc[i, positions_df.columns.get_loc(asset)] = 0.0
                     else:
                         # 其他资产使用估算价格
-                        estimated_price = self._get_asset_price_estimate(asset)
-                        positions_df.iloc[i, positions_df.columns.get_loc(asset)] = quantity * estimated_price
-            
-            # 重命名USDT列为cash
-            if 'USDT' in positions_df.columns:
-                positions_df.rename(columns={'USDT': 'cash'}, inplace=True)
+                        if quantity > 0:
+                            estimated_price = self._get_asset_price_estimate(asset)
+                            if np.isfinite(estimated_price) and estimated_price > 0:
+                                positions_df.iloc[i, positions_df.columns.get_loc(asset)] = quantity * estimated_price
+                            else:
+                                positions_df.iloc[i, positions_df.columns.get_loc(asset)] = 0.0
+                        else:
+                            positions_df.iloc[i, positions_df.columns.get_loc(asset)] = 0.0
             
             logger.info(f"成功计算 {len(positions_df)} 天的持仓数据")
             logger.info(f"涉及的资产: {list(positions_df.columns)}")
+            
+            # 检查是否有无穷大或NaN值
+            for asset in positions_df.columns:
+                inf_count = np.isinf(positions_df[asset]).sum()
+                nan_count = positions_df[asset].isna().sum()
+                if inf_count > 0:
+                    logger.warning(f"{asset}列有 {inf_count} 个无穷大值")
+                if nan_count > 0:
+                    logger.warning(f"{asset}列有 {nan_count} 个NaN值")
             
             return positions_df
             
@@ -1062,7 +1103,7 @@ class BinanceTransactions:
 
     def _calculate_daily_positions_extended(self, raw_transactions, start_date, end_date, btc_price_df):
         """
-        计算扩展的每日持仓变化（从开始日期到结束日期）
+        计算扩展的每日持仓变化（从开始日期到结束日期）- 修复版本
         
         Args:
             raw_transactions (list): 原始交易记录
@@ -1076,71 +1117,126 @@ class BinanceTransactions:
         # 创建完整的日期范围
         date_range = pd.date_range(start=start_date, end=end_date, freq='D', tz='UTC')
         
-        positions_df = pd.DataFrame(index=date_range)
+        # 确定所有涉及的资产
+        all_assets = set(['cash'])  # 包含初始现金
+        for tx in raw_transactions:
+            symbol = tx['symbol']
+            if '/' in symbol:
+                base_asset, quote_asset = symbol.split('/')
+                all_assets.add(base_asset)
+                if quote_asset != 'USDT':
+                    all_assets.add(quote_asset)
         
-        # 初始化持仓追踪
-        holdings = {}  # {asset: quantity}
-        initial_usdt = 10000.0  # 假设初始资金
+        # 创建DataFrame
+        positions_df = pd.DataFrame(0.0, index=date_range, columns=list(all_assets))
         
-        # 设置初始USDT余额
-        holdings['USDT'] = initial_usdt
-        positions_df['USDT'] = initial_usdt
+        # 初始化持仓追踪（资产数量，不是价值）
+        quantities = {asset: 0.0 for asset in all_assets}
+        quantities['cash'] = 10000.0  # 初始现金
+        
+        # 设置初始现金余额
+        positions_df.loc[positions_df.index[0], 'cash'] = 10000.0
         
         # 按日期排序交易记录
         sorted_transactions = sorted(raw_transactions, key=lambda x: x['datetime'])
         
         # 逐日处理交易
-        for date in date_range:
+        for i, date in enumerate(date_range):
+            if i > 0:
+                # 继承前一天的资产数量
+                for asset in all_assets:
+                    quantities[asset] = positions_df.iloc[i-1, positions_df.columns.get_loc(asset)]
+                    if asset != 'cash' and quantities[asset] > 0:
+                        # 对于非现金资产，需要将价值转换为数量
+                        if asset == 'BTC':
+                            if date in btc_price_df.index:
+                                btc_price = btc_price_df.loc[date, 'close']
+                            else:
+                                nearest_date = btc_price_df.index[btc_price_df.index.get_indexer([date], method='nearest')[0]]
+                                btc_price = btc_price_df.loc[nearest_date, 'close']
+                            if np.isfinite(btc_price) and btc_price > 0:
+                                quantities[asset] = quantities[asset] / btc_price
+                        else:
+                            # 其他资产使用估算价格转换为数量
+                            estimated_price = self._get_asset_price_estimate(asset)
+                            if np.isfinite(estimated_price) and estimated_price > 0:
+                                quantities[asset] = quantities[asset] / estimated_price
+            
             # 处理当日的所有交易
             daily_transactions = [tx for tx in sorted_transactions 
                                 if pd.to_datetime(tx['datetime'], utc=True).date() == date.date()]
             
+            # 更新资产数量（不是价值）
             for tx in daily_transactions:
                 symbol = tx['symbol']
                 side = tx['side']
-                amount = tx['amount']
-                cost = tx['cost']
+                amount = tx['amount']  # 这是基础资产的数量
+                cost = tx['cost']      # 这是报价资产的数量
                 
-                # 解析交易对
                 if '/' in symbol:
                     base_asset, quote_asset = symbol.split('/')
                 else:
                     continue
                 
-                # 更新持仓
+                # 确保quote_asset是USDT或其他稳定币，如果是USDT我们当作cash处理
+                if quote_asset == 'USDT':
+                    quote_asset = 'cash'
+                
+                # 更新资产数量
                 if side == 'buy':
                     # 买入base资产，支付quote资产
-                    holdings[base_asset] = holdings.get(base_asset, 0) + amount
-                    holdings[quote_asset] = holdings.get(quote_asset, 0) - cost
+                    quantities[base_asset] = quantities.get(base_asset, 0) + amount
+                    quantities[quote_asset] = quantities.get(quote_asset, 0) - cost
                 else:  # sell
                     # 卖出base资产，获得quote资产
-                    holdings[base_asset] = holdings.get(base_asset, 0) - amount
-                    holdings[quote_asset] = holdings.get(quote_asset, 0) + cost
+                    quantities[base_asset] = quantities.get(base_asset, 0) - amount
+                    quantities[quote_asset] = quantities.get(quote_asset, 0) + cost
             
-            # 计算各资产的USDT价值
-            for asset, quantity in holdings.items():
-                if quantity <= 0:
-                    positions_df.loc[date, asset] = 0
-                    continue
+            # 计算当日持仓价值并更新DataFrame
+            for asset in all_assets:
+                quantity = quantities.get(asset, 0)
                 
-                if asset == 'USDT':
-                    positions_df.loc[date, asset] = quantity
+                if asset == 'cash':
+                    # 现金直接使用数量
+                    positions_df.iloc[i, positions_df.columns.get_loc(asset)] = max(0, quantity)
                 elif asset == 'BTC':
-                    # 获取当日BTC价格
-                    if date in btc_price_df.index:
+                    # BTC数量乘以当日价格
+                    if quantity > 0 and date in btc_price_df.index:
                         btc_price = btc_price_df.loc[date, 'close']
-                    else:
+                        if np.isfinite(btc_price) and btc_price > 0:
+                            positions_df.iloc[i, positions_df.columns.get_loc(asset)] = quantity * btc_price
+                        else:
+                            positions_df.iloc[i, positions_df.columns.get_loc(asset)] = 0.0
+                    elif quantity > 0:
                         # 使用最近的价格
                         nearest_date = btc_price_df.index[btc_price_df.index.get_indexer([date], method='nearest')[0]]
                         btc_price = btc_price_df.loc[nearest_date, 'close']
-                    positions_df.loc[date, asset] = quantity * btc_price
+                        if np.isfinite(btc_price) and btc_price > 0:
+                            positions_df.iloc[i, positions_df.columns.get_loc(asset)] = quantity * btc_price
+                        else:
+                            positions_df.iloc[i, positions_df.columns.get_loc(asset)] = 0.0
+                    else:
+                        positions_df.iloc[i, positions_df.columns.get_loc(asset)] = 0.0
                 else:
                     # 其他资产使用估算价格
-                    estimated_price = self._get_asset_price_estimate(asset)
-                    positions_df.loc[date, asset] = quantity * estimated_price
+                    if quantity > 0:
+                        estimated_price = self._get_asset_price_estimate(asset)
+                        if np.isfinite(estimated_price) and estimated_price > 0:
+                            positions_df.iloc[i, positions_df.columns.get_loc(asset)] = quantity * estimated_price
+                        else:
+                            positions_df.iloc[i, positions_df.columns.get_loc(asset)] = 0.0
+                    else:
+                        positions_df.iloc[i, positions_df.columns.get_loc(asset)] = 0.0
         
-        # 前向填充持仓（在没有交易的日期，持仓保持不变）
-        positions_df = positions_df.fillna(method='ffill').fillna(0)
+        # 检查无穷大值并替换为0
+        for asset in positions_df.columns:
+            inf_mask = np.isinf(positions_df[asset])
+            if inf_mask.any():
+                logger.warning(f"{asset}列有 {inf_mask.sum()} 个无穷大值，已替换为0")
+                positions_df.loc[inf_mask, asset] = 0.0
+        
+        # 填充NaN值为0
+        positions_df = positions_df.fillna(0.0)
         
         return positions_df
     
