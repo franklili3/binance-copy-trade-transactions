@@ -410,6 +410,7 @@ class BinanceTransactions:
     def balance_to_pyfolio_format(self, balance_data, transactions_df=None):
         """
         将余额信息转换为pyfolio格式的positions数据
+        注意：此方法已被弃用，请使用 calculate_positions_from_transactions
         
         Args:
             balance_data (dict): 余额信息字典
@@ -418,54 +419,135 @@ class BinanceTransactions:
         Returns:
             pd.DataFrame: pyfolio格式的持仓数据
         """
-        if not balance_data:
+        logger.warning("balance_to_pyfolio_format方法已弃用，请使用calculate_positions_from_transactions")
+        # 返回空的DataFrame，强制使用新方法
+        return pd.DataFrame()
+    
+    def calculate_positions_from_transactions(self, symbol=None, days=30):
+        """
+        基于交易记录计算每日持仓变化
+        
+        Args:
+            symbol (str): 交易对，如'BTC/USDT'
+            days (int): 分析天数
+            
+        Returns:
+            pd.DataFrame: pyfolio格式的持仓数据，包含每日持仓变化
+        """
+        try:
+            logger.info("开始基于交易记录计算每日持仓...")
+            
+            # 获取原始交易数据
+            since = int(datetime(2025, 4, 1, tzinfo=timezone.utc).timestamp() * 1000)
+            raw_transactions = self.get_all_transactions(symbol=symbol, since=since)
+            
+            if not raw_transactions:
+                logger.warning("没有找到交易记录，返回空的持仓数据")
+                return pd.DataFrame()
+            
+            # 获取价格数据
+            start_date = pd.to_datetime(min(tx['datetime'] for tx in raw_transactions), utc=True).normalize()
+            end_date = pd.Timestamp.now(tz='UTC').normalize()
+            
+            btc_price_df = self.get_bitcoin_price_data(
+                start_date=start_date.strftime('%Y-%m-%d'),
+                end_date=end_date.strftime('%Y-%m-%d')
+            )
+            
+            if btc_price_df.empty:
+                logger.warning("无法获取价格数据，使用模拟数据")
+                btc_price_df = self._get_mock_bitcoin_price_data(start_date, end_date)
+            
+            # 创建日期范围
+            date_range = pd.date_range(start=start_date, end=end_date, freq='D', tz='UTC')
+            positions_df = pd.DataFrame(index=date_range)
+            
+            # 初始化持仓追踪
+            holdings = {}  # {asset: quantity}
+            initial_usdt = 10000.0  # 假设初始资金
+            
+            # 设置初始USDT余额
+            holdings['USDT'] = initial_usdt
+            positions_df['USDT'] = initial_usdt
+            
+            # 按日期排序交易记录
+            sorted_transactions = sorted(raw_transactions, key=lambda x: x['datetime'])
+            
+            # 逐日处理交易
+            for i, date in enumerate(date_range):
+                # 重置当日数据
+                daily_holdings = holdings.copy()
+                
+                # 处理当日的所有交易
+                date_transactions = [tx for tx in sorted_transactions 
+                                   if pd.to_datetime(tx['datetime'], utc=True).date() == date.date()]
+                
+                for tx in date_transactions:
+                    symbol = tx['symbol']
+                    side = tx['side']
+                    amount = tx['amount']
+                    cost = tx['cost']
+                    
+                    # 解析交易对
+                    if '/' in symbol:
+                        base_asset, quote_asset = symbol.split('/')
+                    else:
+                        # 处理特殊情况，如USDT稳定币
+                        continue
+                    
+                    # 更新持仓
+                    if side == 'buy':
+                        # 买入base资产，支付quote资产
+                        daily_holdings[base_asset] = daily_holdings.get(base_asset, 0) + amount
+                        daily_holdings[quote_asset] = daily_holdings.get(quote_asset, 0) - cost
+                    else:  # sell
+                        # 卖出base资产，获得quote资产
+                        daily_holdings[base_asset] = daily_holdings.get(base_asset, 0) - amount
+                        daily_holdings[quote_asset] = daily_holdings.get(quote_asset, 0) + cost
+                
+                # 更新持仓记录
+                holdings = daily_holdings.copy()
+                
+                # 计算各资产的USDT价值
+                for asset, quantity in holdings.items():
+                    if quantity <= 0:
+                        positions_df.loc[date, asset] = 0
+                        continue
+                    
+                    if asset == 'USDT':
+                        positions_df.loc[date, asset] = quantity
+                    elif asset == 'BTC':
+                        # 获取当日BTC价格
+                        if date in btc_price_df.index:
+                            btc_price = btc_price_df.loc[date, 'close']
+                        else:
+                            # 使用最近的价格
+                            nearest_date = btc_price_df.index[btc_price_df.index.get_indexer([date], method='nearest')[0]]
+                            btc_price = btc_price_df.loc[nearest_date, 'close']
+                        positions_df.loc[date, asset] = quantity * btc_price
+                    else:
+                        # 其他资产使用估算价格
+                        estimated_price = self._get_asset_price_estimate(asset)
+                        positions_df.loc[date, asset] = quantity * estimated_price
+                
+                # 确保USDT列存在
+                if 'USDT' not in positions_df.columns:
+                    positions_df['USDT'] = 0.0
+                
+                # 填充缺失值为0
+                positions_df.loc[date] = positions_df.loc[date].fillna(0)
+            
+            # 前向填充持仓（在没有交易的日期，持仓保持不变）
+            positions_df = positions_df.fillna(method='ffill').fillna(0)
+            
+            logger.info(f"成功计算 {len(positions_df)} 天的持仓数据")
+            logger.info(f"涉及的资产: {list(positions_df.columns)}")
+            
+            return positions_df
+            
+        except Exception as e:
+            logger.error(f"计算每日持仓失败: {e}")
             return pd.DataFrame()
-        
-        # 创建时间序列（与交易数据的日期范围一致）
-        if transactions_df is not None and not transactions_df.empty:
-            # 使用交易数据的日期范围，获取所有唯一的日期
-            unique_dates = transactions_df.index.normalize().unique()
-            # 按日期排序
-            date_range = pd.DatetimeIndex(sorted(unique_dates))
-        else:
-            # 如果没有交易数据，使用当前日期
-            date_range = pd.DatetimeIndex([pd.Timestamp.now(tz='UTC').normalize()])
-        
-        # 创建positions DataFrame
-        positions_df = pd.DataFrame(index=date_range)
-        
-        # 为每个资产添加持仓价值列
-        total_usdt_value = 0
-        for asset, amount in balance_data.items():
-            if asset == 'USDT':
-                # USDT直接作为现金
-                positions_df['USDT'] = amount
-                total_usdt_value += amount
-            elif asset == 'BUSD':
-                # BUSD也作为现金（稳定币）
-                positions_df['USDT'] = positions_df.get('USDT', 0) + amount
-                total_usdt_value += amount
-            else:
-                # 其他资产需要估算价值（简化处理，假设1:1与USDT）
-                # 在实际应用中，应该获取实时价格
-                if asset in ['BTC', 'ETH', 'BNB']:
-                    # 主要加密货币，使用估算价值
-                    estimated_value = amount * 50000 if asset == 'BTC' else amount * 3000 if asset == 'ETH' else amount * 300
-                    positions_df[asset] = estimated_value
-                    total_usdt_value += estimated_value
-                else:
-                    # 其他资产，保守估算
-                    estimated_value = amount * 1
-                    positions_df[asset] = estimated_value
-                    total_usdt_value += estimated_value
-        
-        # 如果没有USDT列，创建一个
-        if 'USDT' not in positions_df.columns:
-            positions_df['USDT'] = 0.0
-        
-        logger.info(f"总资产价值估算: {total_usdt_value:.2f} USDT")
-        
-        return positions_df
     
     def transactions_to_pyfolio_format(self, transactions):
         """
@@ -944,12 +1026,19 @@ class BinanceTransactions:
         # 转换为pyfolio格式
         transactions_df = self.transactions_to_pyfolio_format(transactions)
         
-        # 使用余额数据生成positions
-        if balance_data:
-            positions_df = self.balance_to_pyfolio_format(balance_data, transactions_df)
+        # 使用新的方法计算每日持仓变化
+        logger.info("使用新的方法计算每日持仓变化...")
+        positions_df = self.calculate_positions_from_transactions(symbol=symbol, days=days)
+        
+        # 如果新方法失败，回退到旧方法
+        if positions_df.empty:
+            logger.warning("新方法计算持仓失败，回退到旧方法...")
+            if balance_data:
+                positions_df = self.balance_to_pyfolio_format(balance_data, transactions_df)
+            else:
+                positions_df = self.positions_to_pyfolio_format(None, transactions_df)
         else:
-            # 如果没有余额数据，使用交易数据计算
-            positions_df = self.positions_to_pyfolio_format(None, transactions_df)
+            logger.info("新方法成功计算持仓数据")
         
         returns_series = self.calculate_returns(transactions_df)
         
@@ -982,6 +1071,15 @@ class BinanceTransactions:
                 total_value = positions_df.drop('cash', axis=1).sum().sum() + positions_df['cash'].sum()
                 logger.info(f"总持仓价值: {total_value:.2f} USDT")
                 logger.info(f"现金余额: {positions_df['cash'].sum():.2f} USDT")
+            
+            # 显示持仓变化统计
+            logger.info("=== 持仓变化统计 ===")
+            for asset in positions_df.columns:
+                if asset in ['USDT', 'cash']:
+                    continue
+                asset_values = positions_df[asset]
+                if asset_values.max() > 0:
+                    logger.info(f"{asset}: 最小值 {asset_values.min():.2f}, 最大值 {asset_values.max():.2f}, 平均值 {asset_values.mean():.2f}")
         
         if not returns_series.empty:
             logger.info(f"总收益率: {(returns_series.sum() * 100):.2f}%")
