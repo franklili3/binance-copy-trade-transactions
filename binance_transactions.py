@@ -636,9 +636,11 @@ class BinanceTransactions:
                         estimated_price = self._get_asset_price_estimate(asset)
                         positions_df.loc[date, asset] = quantity * estimated_price
                 
-                # 确保USDT列存在
-                if 'USDT' not in positions_df.columns:
-                    positions_df['USDT'] = 0.0
+                # 确保cash列存在（使用cash而不是USDT作为列名）
+                if 'USDT' in positions_df.columns:
+                    positions_df.rename(columns={'USDT': 'cash'}, inplace=True)
+                if 'cash' not in positions_df.columns:
+                    positions_df['cash'] = 0.0
                 
                 # 填充缺失值为0
                 positions_df.loc[date] = positions_df.loc[date].fillna(0)
@@ -1173,8 +1175,10 @@ class BinanceTransactions:
         # 创建收益率序列
         returns = pd.Series(index=date_range, dtype=float)
         
-        # 初始化投资组合价值
-        current_portfolio_value = 10000.0  # 初始价值
+        # 初始化投资组合价值追踪
+        initial_portfolio_value = 10000.0  # 初始价值
+        current_portfolio_value = initial_portfolio_value
+        previous_portfolio_value = initial_portfolio_value
         
         # 为每个日期计算收益率
         for i, date in enumerate(date_range):
@@ -1187,26 +1191,34 @@ class BinanceTransactions:
                 else:
                     daily_transactions = daily_data
             
-            # 计算当日价值变化
-            day_volume = 0.0
+            # 计算当日价值变化（基于交易量）
+            daily_pnl = 0.0
             if not daily_transactions.empty:
-                day_volume = daily_transactions['txn_volume'].sum()
-                # 简化假设：交易金额直接影响投资组合价值
-                current_portfolio_value += day_volume
+                # 交易量已经包含买卖方向（正负值）
+                daily_pnl = daily_transactions['txn_volume'].sum()
+            
+            # 更新投资组合价值
+            previous_portfolio_value = current_portfolio_value
+            current_portfolio_value += daily_pnl
+            
+            # 确保投资组合价值不会变成负数或过小
+            current_portfolio_value = max(current_portfolio_value, 1000.0)
             
             # 计算收益率
             if i == 0:
                 returns.loc[date] = 0.0  # 第一天收益率为0
             else:
-                # 使用前一日价值计算收益率
-                if current_portfolio_value != 0:
-                    # 简化计算：基于交易量的收益率
-                    daily_return = day_volume / max(current_portfolio_value - day_volume, 10000.0)
+                if previous_portfolio_value > 0:
+                    daily_return = (current_portfolio_value - previous_portfolio_value) / previous_portfolio_value
+                    # 限制收益率在合理范围内（-20% 到 +20%）
+                    daily_return = max(min(daily_return, 0.2), -0.2)
                     returns.loc[date] = daily_return
                 else:
                     returns.loc[date] = 0.0
         
         logger.info(f"简化收益率计算完成，数据范围: {returns.index.min()} 到 {returns.index.max()}")
+        logger.info(f"收益率统计: 最小值 {returns.min():.6f}, 最大值 {returns.max():.6f}, 平均值 {returns.mean():.6f}")
+        
         return returns.fillna(0.0)
     
     def save_to_csv(self, data, filename):
@@ -1267,7 +1279,10 @@ class BinanceTransactions:
             self.save_to_csv(positions_df, 'positions_pyfolio.csv')
         
         if not returns_series.empty:
-            self.save_to_csv(returns_series, 'returns_pyfolio.csv')
+            # 为收益率数据设置正确的列名
+            returns_df = returns_series.to_frame()
+            returns_df.columns = ['return']  # 设置列名为return
+            self.save_to_csv(returns_df, 'returns_pyfolio.csv')
         
         # 打印摘要
         logger.info("=== 数据摘要 ===")
@@ -1299,7 +1314,6 @@ class BinanceTransactions:
                     logger.info(f"{asset}: 最小值 {asset_values.min():.2f}, 最大值 {asset_values.max():.2f}, 平均值 {asset_values.mean():.2f}")
         
         if not returns_series.empty:
-            logger.info(f"总收益率: {(returns_series.sum() * 100):.2f}%")
             logger.info(f"平均日收益率: {(returns_series.mean() * 100):.4f}%")
         
         return {
