@@ -813,9 +813,13 @@ class BinanceTransactions:
         
         logger.info("开始基于仓位和比特币价格计算收益率...")
         
-        # 获取比特币价格数据
+        # 确定收益率计算的时间范围：从最早交易日期到当前日期
         start_date = transactions.index.min().normalize()
-        end_date = transactions.index.max().normalize()
+        end_date = pd.Timestamp.now(tz='UTC').normalize()  # 使用当前日期而不是最后交易日期
+        
+        logger.info(f"收益率计算时间范围: {start_date} 到 {end_date}")
+        
+        # 获取比特币价格数据（扩展到当前日期）
         btc_price_df = self.get_bitcoin_price_data(
             start_date=start_date.strftime('%Y-%m-%d'),
             end_date=end_date.strftime('%Y-%m-%d')
@@ -823,14 +827,14 @@ class BinanceTransactions:
         
         if btc_price_df.empty:
             logger.warning("无法获取比特币价格数据，使用简化计算方法")
-            return self._calculate_simple_returns(transactions)
+            return self._calculate_simple_returns(transactions, start_date, end_date)
         
         # 获取原始交易数据以提取symbol和交易方向
         since = int(start_date.timestamp() * 1000)
         raw_transactions = self.get_all_transactions(since=since)
         
         # 计算每日持仓变化
-        daily_positions = self._calculate_daily_positions(raw_transactions, btc_price_df)
+        daily_positions = self._calculate_daily_positions_extended(raw_transactions, start_date, end_date, btc_price_df)
         
         # 计算每日账户净值
         daily_portfolio_value = self._calculate_portfolio_value(daily_positions, btc_price_df)
@@ -840,6 +844,7 @@ class BinanceTransactions:
         
         logger.info(f"基于 {len(daily_portfolio_value)} 天的数据计算收益率")
         logger.info(f"收益率范围: {returns.min():.4f} - {returns.max():.4f}")
+        logger.info(f"收益率数据范围: {returns.index.min()} 到 {returns.index.max()}")
         
         return returns
     
@@ -1053,64 +1058,156 @@ class BinanceTransactions:
             logger.error(f"生成模拟比特币价格数据失败: {e}")
             return pd.DataFrame()
 
-    def _calculate_simple_returns(self, transactions):
+    def _calculate_daily_positions_extended(self, raw_transactions, start_date, end_date, btc_price_df):
+        """
+        计算扩展的每日持仓变化（从开始日期到结束日期）
+        
+        Args:
+            raw_transactions (list): 原始交易记录
+            start_date (pd.Timestamp): 开始日期
+            end_date (pd.Timestamp): 结束日期
+            btc_price_df (pd.DataFrame): 比特币价格数据
+            
+        Returns:
+            pd.DataFrame: 每日持仓数据
+        """
+        # 创建完整的日期范围
+        date_range = pd.date_range(start=start_date, end=end_date, freq='D', tz='UTC')
+        
+        positions_df = pd.DataFrame(index=date_range)
+        
+        # 初始化持仓追踪
+        holdings = {}  # {asset: quantity}
+        initial_usdt = 10000.0  # 假设初始资金
+        
+        # 设置初始USDT余额
+        holdings['USDT'] = initial_usdt
+        positions_df['USDT'] = initial_usdt
+        
+        # 按日期排序交易记录
+        sorted_transactions = sorted(raw_transactions, key=lambda x: x['datetime'])
+        
+        # 逐日处理交易
+        for date in date_range:
+            # 处理当日的所有交易
+            daily_transactions = [tx for tx in sorted_transactions 
+                                if pd.to_datetime(tx['datetime'], utc=True).date() == date.date()]
+            
+            for tx in daily_transactions:
+                symbol = tx['symbol']
+                side = tx['side']
+                amount = tx['amount']
+                cost = tx['cost']
+                
+                # 解析交易对
+                if '/' in symbol:
+                    base_asset, quote_asset = symbol.split('/')
+                else:
+                    continue
+                
+                # 更新持仓
+                if side == 'buy':
+                    # 买入base资产，支付quote资产
+                    holdings[base_asset] = holdings.get(base_asset, 0) + amount
+                    holdings[quote_asset] = holdings.get(quote_asset, 0) - cost
+                else:  # sell
+                    # 卖出base资产，获得quote资产
+                    holdings[base_asset] = holdings.get(base_asset, 0) - amount
+                    holdings[quote_asset] = holdings.get(quote_asset, 0) + cost
+            
+            # 计算各资产的USDT价值
+            for asset, quantity in holdings.items():
+                if quantity <= 0:
+                    positions_df.loc[date, asset] = 0
+                    continue
+                
+                if asset == 'USDT':
+                    positions_df.loc[date, asset] = quantity
+                elif asset == 'BTC':
+                    # 获取当日BTC价格
+                    if date in btc_price_df.index:
+                        btc_price = btc_price_df.loc[date, 'close']
+                    else:
+                        # 使用最近的价格
+                        nearest_date = btc_price_df.index[btc_price_df.index.get_indexer([date], method='nearest')[0]]
+                        btc_price = btc_price_df.loc[nearest_date, 'close']
+                    positions_df.loc[date, asset] = quantity * btc_price
+                else:
+                    # 其他资产使用估算价格
+                    estimated_price = self._get_asset_price_estimate(asset)
+                    positions_df.loc[date, asset] = quantity * estimated_price
+        
+        # 前向填充持仓（在没有交易的日期，持仓保持不变）
+        positions_df = positions_df.fillna(method='ffill').fillna(0)
+        
+        return positions_df
+    
+    def _calculate_simple_returns(self, transactions, start_date=None, end_date=None):
         """
         简化的收益率计算方法（当无法获取价格数据时使用）
         
         Args:
             transactions (pd.DataFrame): 交易数据
+            start_date (pd.Timestamp): 开始日期
+            end_date (pd.Timestamp): 结束日期
             
         Returns:
             pd.Series: 收益率序列
         """
         logger.info("使用简化方法计算收益率...")
         
-        # 按日期排序
+        # 确定日期范围
+        if start_date is None:
+            start_date = transactions.index.min().normalize()
+        if end_date is None:
+            end_date = pd.Timestamp.now(tz='UTC').normalize()
+        
+        logger.info(f"简化收益率计算时间范围: {start_date} 到 {end_date}")
+        
+        # 创建完整的日期范围
+        date_range = pd.date_range(start=start_date, end=end_date, freq='D', tz='UTC')
+        
+        # 按日期排序交易
         transactions_sorted = transactions.sort_index()
         
-        # 计算每日的盈亏
-        daily_pnl = []
-        portfolio_values = []
+        # 创建收益率序列
+        returns = pd.Series(index=date_range, dtype=float)
         
         # 初始化投资组合价值
-        current_portfolio_value = 0.0
+        current_portfolio_value = 10000.0  # 初始价值
         
-        # 使用更兼容的方式按日期分组
-        transactions_sorted['date_only'] = transactions_sorted.index.date
-        for date, group in transactions_sorted.groupby('date_only'):
-            # 简化的收益率计算：基于交易金额的变化
-            day_volume = group['txn_volume'].sum()
-            day_shares = group['txn_shares'].sum()
+        # 为每个日期计算收益率
+        for i, date in enumerate(date_range):
+            # 获取当日交易
+            daily_transactions = pd.DataFrame()
+            if date in transactions_sorted.index:
+                daily_data = transactions_sorted.loc[date]
+                if isinstance(daily_data, pd.Series):
+                    daily_transactions = pd.DataFrame([daily_data])
+                else:
+                    daily_transactions = daily_data
             
-            # 简化假设：每日投资组合价值变化基于交易金额
-            # 这里使用一个简化的收益率计算方法
-            if day_volume != 0:
-                # 基于交易金额的简单收益率计算
-                portfolio_value_change = day_shares * 100  # 简化假设每个share价值100 USDT
-                current_portfolio_value += portfolio_value_change
+            # 计算当日价值变化
+            day_volume = 0.0
+            if not daily_transactions.empty:
+                day_volume = daily_transactions['txn_volume'].sum()
+                # 简化假设：交易金额直接影响投资组合价值
+                current_portfolio_value += day_volume
+            
+            # 计算收益率
+            if i == 0:
+                returns.loc[date] = 0.0  # 第一天收益率为0
             else:
-                portfolio_value_change = 0
-            
-            # 计算收益率（基于前一日价值）
-            if len(portfolio_values) > 0:
-                daily_return = portfolio_value_change / portfolio_values[-1] if portfolio_values[-1] != 0 else 0
-            else:
-                daily_return = 0
-            
-            portfolio_values.append(current_portfolio_value)
-            daily_pnl.append({
-                'date': pd.to_datetime(date),
-                'return': daily_return,
-                'portfolio_value': current_portfolio_value
-            })
+                # 使用前一日价值计算收益率
+                if current_portfolio_value != 0:
+                    # 简化计算：基于交易量的收益率
+                    daily_return = day_volume / max(current_portfolio_value - day_volume, 10000.0)
+                    returns.loc[date] = daily_return
+                else:
+                    returns.loc[date] = 0.0
         
-        # 删除临时列
-        transactions_sorted.drop('date_only', axis=1, inplace=True)
-        
-        returns_df = pd.DataFrame(daily_pnl)
-        returns_df.set_index('date', inplace=True)
-        
-        return returns_df['return']
+        logger.info(f"简化收益率计算完成，数据范围: {returns.index.min()} 到 {returns.index.max()}")
+        return returns.fillna(0.0)
     
     def save_to_csv(self, data, filename):
         """
