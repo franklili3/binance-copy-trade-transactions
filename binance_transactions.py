@@ -35,32 +35,61 @@ class BinanceTransactions:
         """初始化币安API连接"""
         load_dotenv()
         
-        # 获取API密钥
-        api_key = os.getenv('BINANCE_API_KEY')
-        secret_key = os.getenv('BINANCE_SECRET_KEY')
+        # 获取主账户API密钥（用于获取充值提现记录）
+        main_api_key = os.getenv('BINANCE_API_KEY')
+        main_secret_key = os.getenv('BINANCE_SECRET_KEY')
         
-        if not api_key or not secret_key:
-            raise ValueError("请在.env文件中设置BINANCE_API_KEY和BINANCE_SECRET_KEY")
+        # 获取带单项目API密钥（用于获取交易记录）
+        copytrade_api_key = os.getenv('BINANCE_COPYTRADE_API_KEY')
+        copytrade_secret_key = os.getenv('BINANCE_COPYTRADE_SECRET_KEY')
+        
+        if not main_api_key or not main_secret_key:
+            raise ValueError("请在.env文件中设置主账户的BINANCE_API_KEY和BINANCE_SECRET_KEY")
         
         # 检查是否使用测试网
         testnet = os.getenv('BINANCE_TESTNET', 'false').lower() == 'true'
         
-        # 初始化ccxt交易所对象
+        # 初始化主账户交易所对象（用于获取充值提现记录）
         if testnet:
-            self.exchange = ccxt.binance({
-                'apiKey': api_key,
-                'secret': secret_key,
+            self.main_exchange = ccxt.binance({
+                'apiKey': main_api_key,
+                'secret': main_secret_key,
                 'sandbox': True,
                 'enableRateLimit': True,
             })
-            logger.info("使用币安测试网")
+            logger.info("使用币安测试网（主账户）")
         else:
-            self.exchange = ccxt.binance({
-                'apiKey': api_key,
-                'secret': secret_key,
+            self.main_exchange = ccxt.binance({
+                'apiKey': main_api_key,
+                'secret': main_secret_key,
                 'enableRateLimit': True,
             })
-            logger.info("使用币安生产环境")
+            logger.info("使用币安生产环境（主账户）")
+        
+        # 初始化带单项目交易所对象（用于获取交易记录）
+        if copytrade_api_key and copytrade_secret_key:
+            if testnet:
+                self.copytrade_exchange = ccxt.binance({
+                    'apiKey': copytrade_api_key,
+                    'secret': copytrade_secret_key,
+                    'sandbox': True,
+                    'enableRateLimit': True,
+                })
+                logger.info("使用币安测试网（带单项目）")
+            else:
+                self.copytrade_exchange = ccxt.binance({
+                    'apiKey': copytrade_api_key,
+                    'secret': copytrade_secret_key,
+                    'enableRateLimit': True,
+                })
+            logger.info("使用币安生产环境（带单项目）")
+            # 使用带单项目交易所作为默认交易所
+            self.exchange = self.copytrade_exchange
+        else:
+            # 如果没有提供带单项目API，使用主账户API获取所有数据
+            self.copytrade_exchange = None
+            self.exchange = self.main_exchange
+            logger.info("未提供带单项目API，使用主账户API获取所有数据")
         
         # 测试连接
         self._test_connection()
@@ -1523,7 +1552,7 @@ class BinanceTransactions:
     
     def get_usdt_deposits_withdrawals(self, since=None):
         """
-        获取USDT转入转出记录
+        获取USDT转入转出记录（使用主账户API）
         
         Args:
             since (int): 开始时间戳（毫秒）
@@ -1537,11 +1566,14 @@ class BinanceTransactions:
             
             logger.info("获取USDT转入转出记录...")
             
+            # 使用主账户API获取充值提现记录
+            exchange_to_use = self.main_exchange
+            
             # 获取所有充值记录
             deposits = []
             try:
                 # 尝试获取充值记录
-                deposit_history = self.exchange.fetch_deposits(since=since, limit=1000)
+                deposit_history = exchange_to_use.fetch_deposits(since=since, limit=1000)
                 # 过滤USDT充值
                 usdt_deposits = [dep for dep in deposit_history if dep.get('currency') == 'USDT']
                 deposits.extend(usdt_deposits)
@@ -1553,7 +1585,7 @@ class BinanceTransactions:
             withdrawals = []
             try:
                 # 尝试获取提现记录
-                withdrawal_history = self.exchange.fetch_withdrawals(since=since, limit=1000)
+                withdrawal_history = exchange_to_use.fetch_withdrawals(since=since, limit=1000)
                 # 过滤USDT提现
                 usdt_withdrawals = [wid for wid in withdrawal_history if wid.get('currency') == 'USDT']
                 withdrawals.extend(usdt_withdrawals)
