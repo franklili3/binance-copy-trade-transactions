@@ -1582,9 +1582,11 @@ class BinanceTransactions:
         """
         try:
             if not since:
-                since = int(datetime(2025, 4, 1, tzinfo=timezone.utc).timestamp() * 1000)
-            
-            logger.info("获取USDT转入转出记录...")
+                # 使用更长的时间范围来确保获取到所有USDT转入转出记录
+                since = int((datetime.now(timezone.utc) - timedelta(days=365)).timestamp() * 1000)
+                logger.info(f"获取USDT转入转出记录，时间范围: {datetime.fromtimestamp(since/1000, tz=timezone.utc)} 到 {datetime.now(timezone.utc)}")
+            else:
+                logger.info(f"获取USDT转入转出记录，时间范围: {datetime.fromtimestamp(since/1000, tz=timezone.utc)} 到 {datetime.now(timezone.utc)}")
             
             # 使用主账户API获取充值提现记录
             exchange_to_use = self.main_exchange
